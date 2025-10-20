@@ -64,8 +64,8 @@ mod tests {
         assert_eq!(price.price_usd, Some(100.0));
         assert_eq!(price.price_eth, Some(1.0));
 
-        let contract_address: Address = "0x0000000000000000000000000000000000000000".parse().unwrap();
-        let price = get_token_price(&contract_address).await.unwrap();
+        let fmt_address: Address = "0x4e15361fd6b4bb609fa63c81a2be19d873717870".parse().unwrap();
+        let price = get_token_price(&fmt_address).await.unwrap();
         assert_eq!(price.price_usd, Some(200.0));
         assert_eq!(price.price_eth, Some(2.0));
     }
