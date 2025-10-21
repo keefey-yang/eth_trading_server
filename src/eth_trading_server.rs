@@ -31,8 +31,8 @@ pub struct BalanceInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PriceInfo {
     pub symbol: String,
-    pub price_usd: Option<f64>,
-    pub price_eth: Option<f64>,
+    pub price_usdt: Option<f64>,
+    pub price_weth: Option<f64>,
     pub timestamp: u64,
 }
 
@@ -59,8 +59,6 @@ const UNISWAP_FACTORY_V2_ADDRESS: &str = "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5
 lazy_static! {
     static ref GLOBAL_INSTANCE: TokenService = {
         let provider = Provider::<Http>::try_from(ETH_RPC_URL).unwrap();
-        println!("Connected to Ethereum node at {}", ETH_RPC_URL);
-        println!("Provider details: {:?}", provider);
         TokenService { provider: Arc::new(provider) }
     };
 }
@@ -164,46 +162,88 @@ impl TokenService {
         // 调用合约方法获取价格信息
         Ok(PriceInfo {
             symbol: symbol.into(),
-            price_usd: Some(100.0),
-            price_eth: Some(1.0),
+            price_usdt: Some(100.0),
+            price_weth: Some(1.0),
             timestamp: 0,
         })
     }
 
     async fn get_token_price_by_address(&self, token_address: Address) -> Result<PriceInfo> {
         // Placeholder implementation
-        let factory_address = Address::from_str(UNISWAP_FACTORY_V2_ADDRESS)?;
-        let weth_address = Address::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")?;
+        let price_usdt_str = self.get_token_price_in_usdt(token_address).await?;
+        let price_weth_str = self.get_token_price_in_weth(token_address).await?;
+        println!("Token price in USDT: {}, price in WETH: {}", price_usdt_str, price_weth_str);
 
-        let factory_contract = Contract::new(factory_address, FACTORY_V2_ABI.clone(), self.provider.clone());
-        let pair_address: Address = factory_contract
-            .method::<_, Address>("getPair", (token_address, weth_address))?
+        let token_contract = Contract::new(token_address, ERC20_ABI.clone(), self.provider.clone());
+        let symbol = token_contract
+            .method::<_, String>("symbol", ())?
             .call()
             .await
             .map_err(|e| TokenServiceError::ContractCallError(e.to_string()))?;
+        println!("Token symbol: {}", symbol);
 
+        Ok(PriceInfo {
+            symbol: symbol,
+            price_usdt: Some(price_usdt_str.parse::<f64>().unwrap_or(0.0)),
+            price_weth: Some(price_weth_str.parse::<f64>().unwrap_or(0.0)),
+            timestamp: 0,
+        })
+    }
+
+    async fn get_token_price_in_usdt(&self, token_address: Address) -> Result<String> {
+        // Placeholder implementation
+        let factory_address = Address::from_str(UNISWAP_FACTORY_V2_ADDRESS)?;
+        let usdt_address = Address::from_str("0xdAC17F958D2ee523a2206206994597C13D831ec7")?;
+        let factory_contract = Contract::new(factory_address, FACTORY_V2_ABI.clone(), self.provider.clone());
+        let pair_address: Address = factory_contract
+            .method::<_, Address>("getPair", (token_address, usdt_address))?
+            .call()
+            .await
+            .map_err(|e| TokenServiceError::ContractCallError(e.to_string()))?;
         let pair_contract = Contract::new(pair_address, PAIR_V2_ABI.clone(), self.provider.clone());
         let (reserve0, reserve1, _): (U256, U256, u32) = pair_contract
             .method::<_, (U256, U256, u32)>("getReserves", ())?
             .call()
             .await
             .map_err(|e| TokenServiceError::ContractCallError(e.to_string()))?;
-
+        println!("Reserves: reserve0 = {}, reserve1 = {}", reserve0, reserve1);
         let decimal = pair_contract
             .method::<_, u8>("decimals", ())?
             .call()
             .await
             .map_err(|e| TokenServiceError::ContractCallError(e.to_string()))?;
-
         let price = reserve1.as_u128() as f64 / reserve0.as_u128() as f64;
         let format_price = utils::format_units(U256::from((price * 1e18) as u128), decimal as i32)?;
-        println!("Price of token in WETH: {}", format_price);
-        Ok(PriceInfo {
-            symbol: "TOKEN".into(),
-            price_usd: Some(200.0),
-            price_eth: Some(2.0),
-            timestamp: 0,
-        })
+        println!("Formatted price in USDT: {}", format_price);
+        Ok(format_price)
+    }
+
+    async fn get_token_price_in_weth(&self, token_address: Address) -> Result<String> {
+        // Placeholder implementation
+        let factory_address = Address::from_str(UNISWAP_FACTORY_V2_ADDRESS)?;
+        let weth_address = Address::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")?;
+        let factory_contract = Contract::new(factory_address, FACTORY_V2_ABI.clone(), self.provider.clone());
+        let pair_address: Address = factory_contract
+            .method::<_, Address>("getPair", (token_address, weth_address))?
+            .call()
+            .await
+            .map_err(|e| TokenServiceError::ContractCallError(e.to_string()))?;
+        let pair_contract = Contract::new(pair_address, PAIR_V2_ABI.clone(), self.provider.clone());
+        let (reserve0, reserve1, _): (U256, U256, u32) = pair_contract
+            .method::<_, (U256, U256, u32)>("getReserves", ())?
+            .call()
+            .await
+            .map_err(|e| TokenServiceError::ContractCallError(e.to_string()))?;
+        println!("Reserves: reserve0 = {}, reserve1 = {}", reserve0, reserve1);
+        let decimal = pair_contract
+            .method::<_, u8>("decimals", ())?
+            .call()
+            .await
+            .map_err(|e| TokenServiceError::ContractCallError(e.to_string()))?;
+        let price = reserve1.as_u128() as f64 / reserve0.as_u128() as f64;
+        let format_price = utils::format_units(U256::from((price * 1e18) as u128), decimal as i32)?;
+        println!("Formatted price in WETH: {}", format_price);
+        Ok(format_price)
     }
 
     async fn swap_tokens(&self, from_token: Address, to_token: Address, amount: f64, slippage: f64) -> Result<SwapSimulationInfo> {

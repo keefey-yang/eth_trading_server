@@ -61,13 +61,14 @@ mod tests {
     async fn test_get_token_price() {
         let symbol  = "ETH".to_string();
         let price = get_token_price(&symbol).await.unwrap();
-        assert_eq!(price.price_usd, Some(100.0));
-        assert_eq!(price.price_eth, Some(1.0));
+        assert!(price.price_usdt.is_some());
+        assert!(price.price_usdt.unwrap() > 0.0);
 
         let fmt_address: Address = "0x4e15361fd6b4bb609fa63c81a2be19d873717870".parse().unwrap();
         let price = get_token_price(&fmt_address).await.unwrap();
-        assert_eq!(price.price_usd, Some(200.0));
-        assert_eq!(price.price_eth, Some(2.0));
+        assert_eq!(price.symbol, "FTM");
+        assert!(price.price_usdt.is_some());
+        assert!(price.price_weth.is_some());
     }
 
     #[tokio::test]
