@@ -1,262 +1,153 @@
-use ethers::{
-    abi::{Abi, Token}, contract::{self, Contract}, middleware::transformer::ds_proxy::factory, prelude::*, providers::{Http, Middleware, Provider}, types::{Address, Bytes, TransactionRequest, H160, U256}, utils
+use anyhow::{Result, Error};
+use rmcp::{
+    ErrorData as McpError,
+    ServerHandler,
+    handler::server::{tool::ToolRouter, wrapper::Parameters},
+    model::{CallToolResult, Content, ErrorCode},
+    schemars, tool, tool_handler, tool_router,
 };
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
-use lazy_static::lazy_static;
-use std::{str::FromStr, sync::Arc};
 
-#[derive(Error, Debug)]
-pub enum TokenServiceError {
-    #[error("Invalid address: {0}")]
-    InvalidAddress(String),
-    #[error("RPC error: {0}")]
-    RpcError(String),
-    #[error("Contract call error: {0}")]
-    ContractCallError(String),
-    #[error("Invalid amount: {0}")]
-    InvalidAmount(String),
-}
-
-// 余额信息结构体
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BalanceInfo {
-    pub balance: String,
-    pub decimals: u8,
-    pub symbol: String,
-    pub formatted: String,
-}
-
-// 价格信息结构体
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PriceInfo {
-    pub symbol: String,
-    pub price_usdt: Option<f64>,
-    pub price_weth: Option<f64>,
-    pub timestamp: u64,
-}
-
-// 交易模拟结果
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SwapSimulationInfo {
-    pub input_amount: String,
-    pub output_amount: String,
-    pub gas_estimate: u64,
-    pub gas_cost_eth: String,
-    pub gas_cost_usd: Option<String>,
-    pub price_impact: f64,
-    pub success: bool,
-}
-
-pub struct TokenService {
-    provider: Arc<Provider<Http>>,
-}
+use ethers::{providers::{Http, Middleware, Provider}, types::Address};
+use std::{str::FromStr};
 
 const ETH_RPC_URL: &str = "https://mainnet.infura.io/v3/3f2af82e9b964e57bbb9d85f720f3bcb";
-const UNISWAP_V2_ROUTER_ADDRESS: &str = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D";
-const UNISWAP_FACTORY_V2_ADDRESS: &str = "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f";
+const ERC200_ABI_JSON: &str = r#"
+[
+    {
+        "constant": true,
+        "inputs": [{"name": "_owner", "type": "address"}],
+        "name": "balanceOf",
+        "outputs": [{"name": "balance", "type": "uint256"}],
+        "type": "function"
+    },
+    {
+        "constant": true,
+        "inputs": [],
+        "name": "decimals",
+        "outputs": [{"name": "", "type": "uint8"}],
+        "type": "function"
+    },
+    {
+        "constant": true,
+        "inputs": [],
+        "name": "symbol",
+        "outputs": [{"name": "", "type": "string"}],
+        "type": "function"
+    },
+    {
+        "constant": true,
+        "inputs": [],
+        "name": "name",
+        "outputs": [{"name": "", "type": "string"}],
+        "type": "function"
+    }
+]"#;
 
-lazy_static! {
-    static ref GLOBAL_INSTANCE: TokenService = {
-        let provider = Provider::<Http>::try_from(ETH_RPC_URL).unwrap();
-        TokenService { provider: Arc::new(provider) }
-    };
+#[derive(Debug, schemars::JsonSchema, serde::Deserialize)]
+pub struct AddressRequest {
+    pub wallet_address_str: String,
+    pub token_addresses_str: Option<String>,
 }
 
-// ERC20 ABI
-lazy_static::lazy_static! {
-    static ref ERC20_ABI: Abi = serde_json::from_str(r#"
-    [
-        {
-            "constant": true,
-            "inputs": [{"name": "_owner", "type": "address"}],
-            "name": "balanceOf",
-            "outputs": [{"name": "balance", "type": "uint256"}],
-            "type": "function"
-        },
-        {
-            "constant": true,
-            "inputs": [],
-            "name": "decimals",
-            "outputs": [{"name": "", "type": "uint8"}],
-            "type": "function"
-        },
-        {
-            "constant": true,
-            "inputs": [],
-            "name": "symbol",
-            "outputs": [{"name": "", "type": "string"}],
-            "type": "function"
-        },
-        {
-            "constant": true,
-            "inputs": [],
-            "name": "name",
-            "outputs": [{"name": "", "type": "string"}],
-            "type": "function"
+#[derive(Debug, schemars::JsonSchema, serde::Deserialize)]
+pub struct TokenAddressOrSymbol {
+    pub address: Option<String>,
+    pub symbol: Option<String>,
+}
+
+#[derive(Debug, schemars::JsonSchema, serde::Deserialize)]
+pub struct  SwapTokenPair {
+    pub from_token: String,
+    pub to_token: String,
+    pub amount: f64,
+}
+
+#[derive(Clone)]
+pub struct ETHTradingMCP {
+    tool_router: ToolRouter<ETHTradingMCP>
+}
+
+#[tool_router]
+impl ETHTradingMCP {
+    #[allow(dead_code)]
+    pub fn new() -> Self {
+        Self {
+            tool_router: Self::tool_router(),
         }
-    ]"#).unwrap();
+    }
+
+    async fn get_eth_balance_of_wallet_address(&self, wallet_address: Address) -> Result<String, Error> {
+        let provider = Provider::<Http>::try_from(ETH_RPC_URL)?;
+        let balance = provider.get_balance(wallet_address, None).await?;
+        let eth_balance = ethers::utils::format_ether(balance);
+        Ok(format!("The balance of wallet {} is {} ETH", wallet_address, eth_balance))
+    }
+
+    async fn get_erc200_token_balance_of_wallet_address(&self, wallet_address: Address, token_address: Address) -> Result<String, Error> {
+        // Mock implementation, replace with actual ERC20 token balance fetching logic
+        let erc200_abi = ethers::abi::Abi::load(ERC200_ABI_JSON.as_bytes())?;
+        let provider = std::sync::Arc::new(Provider::<Http>::try_from(ETH_RPC_URL)?);
+        // Here you would create a contract instance and call the balanceOf function
+        let contract = ethers::contract::Contract::new(token_address, erc200_abi, provider);
+        let decimals = contract.method::<_, u8>("decimals", ())?.call().await?;
+        let symbol = contract.method::<_, String>("symbol", ())?.call().await?;
+        let balance: ethers::types::U256 = contract.method::<_, ethers::types::U256>("balanceOf", wallet_address)?.call().await?;
+        let formatted_balance = ethers::utils::format_units(balance, decimals as usize)?;
+        Ok(format!("The balance of wallet {} for token {} (symbol: {}) is {}", wallet_address, token_address, symbol, formatted_balance))
+    }
+
+    #[tool(description = "Say hello to the client")]
+    pub async fn say_hello(&self) -> Result<CallToolResult, McpError> {
+        Ok(CallToolResult::success(vec![Content::text("hello, it is my first mcp tool!")]))
+    }
+
+    #[tool(description = "Get the ETH or token balances of a wallet address for given token addresses")]
+    pub async fn get_wallet_eth_or_tokens_balance(&self, Parameters(AddressRequest {wallet_address_str, token_addresses_str}): Parameters<AddressRequest>) -> Result<CallToolResult, McpError> {
+        let wallet_address = Address::from_str(&wallet_address_str)
+                                        .map_err(|e| McpError::new(ErrorCode::PARSE_ERROR, format!("Invalid wallet address: {}", e), None))?;
+        match token_addresses_str {
+            Some(token_address_str) => {
+                let token_address = Address::from_str(&token_address_str)
+                                        .map_err(|e| McpError::new(ErrorCode::PARSE_ERROR, format!("Invalid token address: {}", e), None))?;
+                let result = self.get_erc200_token_balance_of_wallet_address(wallet_address, token_address).await
+                    .map_err(|_| McpError::new(ErrorCode::INTERNAL_ERROR, "get token balance failed!", None))?;
+                Ok(CallToolResult::success(vec![Content::text(result)]))
+            }
+            None => {
+                let result = self.get_eth_balance_of_wallet_address(wallet_address).await
+                    .map_err(|_| McpError::new(ErrorCode::INTERNAL_ERROR, "get ETH balance failed!", None))?;
+                Ok(CallToolResult::success(vec![Content::text(result)]))
+            }
+        }
+    }
+
+    #[tool(description = "Get the price of a token by its address or symbol")]
+    pub async fn get_price_of_token(&self, Parameters(TokenAddressOrSymbol {address, symbol}): Parameters<TokenAddressOrSymbol>) -> Result<CallToolResult, McpError> {
+        let token_info = if let Some(addr) = address {
+            format!("address: {}", addr)
+        } else if let Some(sym) = symbol {
+            format!("symbol: {}", sym)
+        } else {
+            return Err(McpError::new(ErrorCode::PARSE_ERROR, "Either address or symbol must be provided".to_string(), None));
+        };
+
+        // Mock implementation, replace with actual API call
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "The price of token with {} is $100",
+            token_info
+        ))]))
+    }
+
+    #[tool(description = "Simulate swapping tokens on a decentralized exchange")]
+    pub async fn swap_tokens_simulate(&self, Parameters(SwapTokenPair {from_token, to_token, amount}): Parameters<SwapTokenPair>) -> Result<CallToolResult, McpError> {
+        // Mock implementation, replace with actual API call
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Simulated swapping {} of {} to {}. You will receive approximately {} {}.",
+            amount, from_token, to_token, amount * 0.98, to_token
+        ))]))
+    }
 }
 
-// Uniswap V2 Router ABI 片段
-lazy_static::lazy_static! {
-    static ref UNISWAP_V2_ROUTER_ABI: Abi = serde_json::from_str(r#"[{"inputs":[{"internalType":"address","name":"_factory","type":"address"},{"internalType":"address","name":"_WETH","type":"address"}],"stateMutability":"nonpayable","type":"constructor"},{"inputs":[],"name":"WETH","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"tokenA","type":"address"},{"internalType":"address","name":"tokenB","type":"address"},{"internalType":"uint256","name":"amountADesired","type":"uint256"},{"internalType":"uint256","name":"amountBDesired","type":"uint256"},{"internalType":"uint256","name":"amountAMin","type":"uint256"},{"internalType":"uint256","name":"amountBMin","type":"uint256"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"addLiquidity","outputs":[{"internalType":"uint256","name":"amountA","type":"uint256"},{"internalType":"uint256","name":"amountB","type":"uint256"},{"internalType":"uint256","name":"liquidity","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"token","type":"address"},{"internalType":"uint256","name":"amountTokenDesired","type":"uint256"},{"internalType":"uint256","name":"amountTokenMin","type":"uint256"},{"internalType":"uint256","name":"amountETHMin","type":"uint256"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"addLiquidityETH","outputs":[{"internalType":"uint256","name":"amountToken","type":"uint256"},{"internalType":"uint256","name":"amountETH","type":"uint256"},{"internalType":"uint256","name":"liquidity","type":"uint256"}],"stateMutability":"payable","type":"function"},{"inputs":[],"name":"factory","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"},{"internalType":"uint256","name":"reserveIn","type":"uint256"},{"internalType":"uint256","name":"reserveOut","type":"uint256"}],"name":"getAmountIn","outputs":[{"internalType":"uint256","name":"amountIn","type":"uint256"}],"stateMutability":"pure","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"reserveIn","type":"uint256"},{"internalType":"uint256","name":"reserveOut","type":"uint256"}],"name":"getAmountOut","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],"stateMutability":"pure","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"},{"internalType":"address[]","name":"path","type":"address[]"}],"name":"getAmountsIn","outputs":[{"internalType":"uint256[]","name":"amounts","type":"uint256[]"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"address[]","name":"path","type":"address[]"}],"name":"getAmountsOut","outputs":[{"internalType":"uint256[]","name":"amounts","type":"uint256[]"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountA","type":"uint256"},{"internalType":"uint256","name":"reserveA","type":"uint256"},{"internalType":"uint256","name":"reserveB","type":"uint256"}],"name":"quote","outputs":[{"internalType":"uint256","name":"amountB","type":"uint256"}],"stateMutability":"pure","type":"function"},{"inputs":[{"internalType":"address","name":"tokenA","type":"address"},{"internalType":"address","name":"tokenB","type":"address"},{"internalType":"uint256","name":"liquidity","type":"uint256"},{"internalType":"uint256","name":"amountAMin","type":"uint256"},{"internalType":"uint256","name":"amountBMin","type":"uint256"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"removeLiquidity","outputs":[{"internalType":"uint256","name":"amountA","type":"uint256"},{"internalType":"uint256","name":"amountB","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"token","type":"address"},{"internalType":"uint256","name":"liquidity","type":"uint256"},{"internalType":"uint256","name":"amountTokenMin","type":"uint256"},{"internalType":"uint256","name":"amountETHMin","type":"uint256"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"removeLiquidityETH","outputs":[{"internalType":"uint256","name":"amountToken","type":"uint256"},{"internalType":"uint256","name":"amountETH","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"token","type":"address"},{"internalType":"uint256","name":"liquidity","type":"uint256"},{"internalType":"uint256","name":"amountTokenMin","type":"uint256"},{"internalType":"uint256","name":"amountETHMin","type":"uint256"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"removeLiquidityETHSupportingFeeOnTransferTokens","outputs":[{"internalType":"uint256","name":"amountETH","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"token","type":"address"},{"internalType":"uint256","name":"liquidity","type":"uint256"},{"internalType":"uint256","name":"amountTokenMin","type":"uint256"},{"internalType":"uint256","name":"amountETHMin","type":"uint256"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"},{"internalType":"bool","name":"approveMax","type":"bool"},{"internalType":"uint8","name":"v","type":"uint8"},{"internalType":"bytes32","name":"r","type":"bytes32"},{"internalType":"bytes32","name":"s","type":"bytes32"}],"name":"removeLiquidityETHWithPermit","outputs":[{"internalType":"uint256","name":"amountToken","type":"uint256"},{"internalType":"uint256","name":"amountETH","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"token","type":"address"},{"internalType":"uint256","name":"liquidity","type":"uint256"},{"internalType":"uint256","name":"amountTokenMin","type":"uint256"},{"internalType":"uint256","name":"amountETHMin","type":"uint256"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"},{"internalType":"bool","name":"approveMax","type":"bool"},{"internalType":"uint8","name":"v","type":"uint8"},{"internalType":"bytes32","name":"r","type":"bytes32"},{"internalType":"bytes32","name":"s","type":"bytes32"}],"name":"removeLiquidityETHWithPermitSupportingFeeOnTransferTokens","outputs":[{"internalType":"uint256","name":"amountETH","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"tokenA","type":"address"},{"internalType":"address","name":"tokenB","type":"address"},{"internalType":"uint256","name":"liquidity","type":"uint256"},{"internalType":"uint256","name":"amountAMin","type":"uint256"},{"internalType":"uint256","name":"amountBMin","type":"uint256"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"},{"internalType":"bool","name":"approveMax","type":"bool"},{"internalType":"uint8","name":"v","type":"uint8"},{"internalType":"bytes32","name":"r","type":"bytes32"},{"internalType":"bytes32","name":"s","type":"bytes32"}],"name":"removeLiquidityWithPermit","outputs":[{"internalType":"uint256","name":"amountA","type":"uint256"},{"internalType":"uint256","name":"amountB","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"},{"internalType":"address[]","name":"path","type":"address[]"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"swapETHForExactTokens","outputs":[{"internalType":"uint256[]","name":"amounts","type":"uint256[]"}],"stateMutability":"payable","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountOutMin","type":"uint256"},{"internalType":"address[]","name":"path","type":"address[]"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"swapExactETHForTokens","outputs":[{"internalType":"uint256[]","name":"amounts","type":"uint256[]"}],"stateMutability":"payable","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountOutMin","type":"uint256"},{"internalType":"address[]","name":"path","type":"address[]"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"swapExactETHForTokensSupportingFeeOnTransferTokens","outputs":[],"stateMutability":"payable","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMin","type":"uint256"},{"internalType":"address[]","name":"path","type":"address[]"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"swapExactTokensForETH","outputs":[{"internalType":"uint256[]","name":"amounts","type":"uint256[]"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMin","type":"uint256"},{"internalType":"address[]","name":"path","type":"address[]"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"swapExactTokensForETHSupportingFeeOnTransferTokens","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMin","type":"uint256"},{"internalType":"address[]","name":"path","type":"address[]"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"swapExactTokensForTokens","outputs":[{"internalType":"uint256[]","name":"amounts","type":"uint256[]"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMin","type":"uint256"},{"internalType":"address[]","name":"path","type":"address[]"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"swapExactTokensForTokensSupportingFeeOnTransferTokens","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"},{"internalType":"uint256","name":"amountInMax","type":"uint256"},{"internalType":"address[]","name":"path","type":"address[]"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"swapTokensForExactETH","outputs":[{"internalType":"uint256[]","name":"amounts","type":"uint256[]"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"},{"internalType":"uint256","name":"amountInMax","type":"uint256"},{"internalType":"address[]","name":"path","type":"address[]"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"swapTokensForExactTokens","outputs":[{"internalType":"uint256[]","name":"amounts","type":"uint256[]"}],"stateMutability":"nonpayable","type":"function"},{"stateMutability":"payable","type":"receive"}]"#).unwrap();
-    static ref FACTORY_V2_ABI: Abi = serde_json::from_str(r#"[{"inputs":[{"internalType":"address","name":"_feeToSetter","type":"address"}],"payable":false,"stateMutability":"nonpayable","type":"constructor"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"token0","type":"address"},{"indexed":true,"internalType":"address","name":"token1","type":"address"},{"indexed":false,"internalType":"address","name":"pair","type":"address"},{"indexed":false,"internalType":"uint256","name":"","type":"uint256"}],"name":"PairCreated","type":"event"},{"constant":true,"inputs":[{"internalType":"uint256","name":"","type":"uint256"}],"name":"allPairs","outputs":[{"internalType":"address","name":"","type":"address"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":true,"inputs":[],"name":"allPairsLength","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":false,"inputs":[{"internalType":"address","name":"tokenA","type":"address"},{"internalType":"address","name":"tokenB","type":"address"}],"name":"createPair","outputs":[{"internalType":"address","name":"pair","type":"address"}],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":true,"inputs":[],"name":"feeTo","outputs":[{"internalType":"address","name":"","type":"address"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":true,"inputs":[],"name":"feeToSetter","outputs":[{"internalType":"address","name":"","type":"address"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":true,"inputs":[{"internalType":"address","name":"","type":"address"},{"internalType":"address","name":"","type":"address"}],"name":"getPair","outputs":[{"internalType":"address","name":"","type":"address"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":false,"inputs":[{"internalType":"address","name":"_feeTo","type":"address"}],"name":"setFeeTo","outputs":[],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":false,"inputs":[{"internalType":"address","name":"_feeToSetter","type":"address"}],"name":"setFeeToSetter","outputs":[],"payable":false,"stateMutability":"nonpayable","type":"function"}]"#).unwrap();
-    static ref PAIR_V2_ABI: Abi = serde_json::from_str(r#"[{"inputs":[],"payable":false,"stateMutability":"nonpayable","type":"constructor"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"owner","type":"address"},{"indexed":true,"internalType":"address","name":"spender","type":"address"},{"indexed":false,"internalType":"uint256","name":"value","type":"uint256"}],"name":"Approval","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"sender","type":"address"},{"indexed":false,"internalType":"uint256","name":"amount0","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"amount1","type":"uint256"},{"indexed":true,"internalType":"address","name":"to","type":"address"}],"name":"Burn","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"sender","type":"address"},{"indexed":false,"internalType":"uint256","name":"amount0","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"amount1","type":"uint256"}],"name":"Mint","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"sender","type":"address"},{"indexed":false,"internalType":"uint256","name":"amount0In","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"amount1In","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"amount0Out","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"amount1Out","type":"uint256"},{"indexed":true,"internalType":"address","name":"to","type":"address"}],"name":"Swap","type":"event"},{"anonymous":false,"inputs":[{"indexed":false,"internalType":"uint112","name":"reserve0","type":"uint112"},{"indexed":false,"internalType":"uint112","name":"reserve1","type":"uint112"}],"name":"Sync","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"from","type":"address"},{"indexed":true,"internalType":"address","name":"to","type":"address"},{"indexed":false,"internalType":"uint256","name":"value","type":"uint256"}],"name":"Transfer","type":"event"},{"constant":true,"inputs":[],"name":"DOMAIN_SEPARATOR","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":true,"inputs":[],"name":"MINIMUM_LIQUIDITY","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":true,"inputs":[],"name":"PERMIT_TYPEHASH","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":true,"inputs":[{"internalType":"address","name":"","type":"address"},{"internalType":"address","name":"","type":"address"}],"name":"allowance","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":false,"inputs":[{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"value","type":"uint256"}],"name":"approve","outputs":[{"internalType":"bool","name":"","type":"bool"}],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":true,"inputs":[{"internalType":"address","name":"","type":"address"}],"name":"balanceOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":false,"inputs":[{"internalType":"address","name":"to","type":"address"}],"name":"burn","outputs":[{"internalType":"uint256","name":"amount0","type":"uint256"},{"internalType":"uint256","name":"amount1","type":"uint256"}],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":true,"inputs":[],"name":"decimals","outputs":[{"internalType":"uint8","name":"","type":"uint8"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":true,"inputs":[],"name":"factory","outputs":[{"internalType":"address","name":"","type":"address"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":true,"inputs":[],"name":"getReserves","outputs":[{"internalType":"uint112","name":"_reserve0","type":"uint112"},{"internalType":"uint112","name":"_reserve1","type":"uint112"},{"internalType":"uint32","name":"_blockTimestampLast","type":"uint32"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":false,"inputs":[{"internalType":"address","name":"_token0","type":"address"},{"internalType":"address","name":"_token1","type":"address"}],"name":"initialize","outputs":[],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":true,"inputs":[],"name":"kLast","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":false,"inputs":[{"internalType":"address","name":"to","type":"address"}],"name":"mint","outputs":[{"internalType":"uint256","name":"liquidity","type":"uint256"}],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":true,"inputs":[],"name":"name","outputs":[{"internalType":"string","name":"","type":"string"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":true,"inputs":[{"internalType":"address","name":"","type":"address"}],"name":"nonces","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":false,"inputs":[{"internalType":"address","name":"owner","type":"address"},{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"value","type":"uint256"},{"internalType":"uint256","name":"deadline","type":"uint256"},{"internalType":"uint8","name":"v","type":"uint8"},{"internalType":"bytes32","name":"r","type":"bytes32"},{"internalType":"bytes32","name":"s","type":"bytes32"}],"name":"permit","outputs":[],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":true,"inputs":[],"name":"price0CumulativeLast","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":true,"inputs":[],"name":"price1CumulativeLast","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":false,"inputs":[{"internalType":"address","name":"to","type":"address"}],"name":"skim","outputs":[],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":false,"inputs":[{"internalType":"uint256","name":"amount0Out","type":"uint256"},{"internalType":"uint256","name":"amount1Out","type":"uint256"},{"internalType":"address","name":"to","type":"address"},{"internalType":"bytes","name":"data","type":"bytes"}],"name":"swap","outputs":[],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":true,"inputs":[],"name":"symbol","outputs":[{"internalType":"string","name":"","type":"string"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":false,"inputs":[],"name":"sync","outputs":[],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":true,"inputs":[],"name":"token0","outputs":[{"internalType":"address","name":"","type":"address"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":true,"inputs":[],"name":"token1","outputs":[{"internalType":"address","name":"","type":"address"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":true,"inputs":[],"name":"totalSupply","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":false,"inputs":[{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"value","type":"uint256"}],"name":"transfer","outputs":[{"internalType":"bool","name":"","type":"bool"}],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":false,"inputs":[{"internalType":"address","name":"from","type":"address"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"value","type":"uint256"}],"name":"transferFrom","outputs":[{"internalType":"bool","name":"","type":"bool"}],"payable":false,"stateMutability":"nonpayable","type":"function"}]"#).unwrap();
-}
-
-impl TokenService {
-    async fn get_eth_balance(&self, wallet_address: Address) -> Result<BalanceInfo> {
-        // Placeholder implementation
-        let balance = self.provider
-            .get_balance(wallet_address, None)
-            .await
-            .map_err(|e| TokenServiceError::RpcError(e.to_string()))?;
-        
-        let balance_eth = utils::format_units(balance, "ether")
-            .map_err(|e| TokenServiceError::InvalidAmount(e.to_string()))?;
-        Ok(BalanceInfo {
-            balance: balance.to_string(),
-            decimals: 18,
-            symbol: "ETH".into(),
-            formatted: format!("{} ETH", balance_eth),
-        })
-    }
-
-    async fn get_erc20_balance(&self, wallet_addr: Address, contract_address: Address) -> Result<BalanceInfo> {
-        // Placeholder implementation
-        let contract = Contract::new(contract_address, ERC20_ABI.clone(), self.provider.clone());
-        // 获取余额
-        let balance: U256 = contract
-            .method::<_, U256>("balanceOf", wallet_addr).unwrap()
-            .call()
-            .await
-            .map_err(|e| TokenServiceError::ContractCallError(e.to_string()))?;
-
-        // 获取小数位
-        let decimals: u8 = contract
-            .method::<_, u8>("decimals", ())?
-            .call()
-            .await
-            .map_err(|e| TokenServiceError::ContractCallError(e.to_string()))?;
-
-        // 获取符号
-        let symbol: String = contract
-            .method::<_, String>("symbol", ())?
-            .call()
-            .await
-            .unwrap_or_else(|_| "UNKNOWN".to_string());
-
-        let formatted = utils::format_units(balance, decimals as i32)?;
-        
-        Ok(BalanceInfo {
-            balance: balance.to_string(),
-            decimals,
-            symbol,
-            formatted,
-        })
-    }
-
-    async fn get_token_price_by_symbol(&self, symbol: &str) -> Result<PriceInfo> {
-        // Placeholder implementation
-        // 调用合约方法获取价格信息
-        Ok(PriceInfo {
-            symbol: symbol.into(),
-            price_usdt: Some(100.0),
-            price_weth: Some(1.0),
-            timestamp: 0,
-        })
-    }
-
-    async fn get_token_price_by_address(&self, token_address: Address) -> Result<PriceInfo> {
-        // Placeholder implementation
-        let price_usdt_str = self.get_token_price_in_usdt(token_address).await?;
-        let price_weth_str = self.get_token_price_in_weth(token_address).await?;
-        println!("Token price in USDT: {}, price in WETH: {}", price_usdt_str, price_weth_str);
-
-        let token_contract = Contract::new(token_address, ERC20_ABI.clone(), self.provider.clone());
-        let symbol = token_contract
-            .method::<_, String>("symbol", ())?
-            .call()
-            .await
-            .map_err(|e| TokenServiceError::ContractCallError(e.to_string()))?;
-        println!("Token symbol: {}", symbol);
-
-        Ok(PriceInfo {
-            symbol: symbol,
-            price_usdt: Some(price_usdt_str.parse::<f64>().unwrap_or(0.0)),
-            price_weth: Some(price_weth_str.parse::<f64>().unwrap_or(0.0)),
-            timestamp: 0,
-        })
-    }
-
-    async fn get_token_price_in_usdt(&self, token_address: Address) -> Result<String> {
-        // Placeholder implementation
-        let factory_address = Address::from_str(UNISWAP_FACTORY_V2_ADDRESS)?;
-        let usdt_address = Address::from_str("0xdAC17F958D2ee523a2206206994597C13D831ec7")?;
-        let factory_contract = Contract::new(factory_address, FACTORY_V2_ABI.clone(), self.provider.clone());
-        let pair_address: Address = factory_contract
-            .method::<_, Address>("getPair", (token_address, usdt_address))?
-            .call()
-            .await
-            .map_err(|e| TokenServiceError::ContractCallError(e.to_string()))?;
-        let pair_contract = Contract::new(pair_address, PAIR_V2_ABI.clone(), self.provider.clone());
-        let (reserve0, reserve1, _): (U256, U256, u32) = pair_contract
-            .method::<_, (U256, U256, u32)>("getReserves", ())?
-            .call()
-            .await
-            .map_err(|e| TokenServiceError::ContractCallError(e.to_string()))?;
-        println!("Reserves: reserve0 = {}, reserve1 = {}", reserve0, reserve1);
-        let decimal = pair_contract
-            .method::<_, u8>("decimals", ())?
-            .call()
-            .await
-            .map_err(|e| TokenServiceError::ContractCallError(e.to_string()))?;
-        let price = reserve1.as_u128() as f64 / reserve0.as_u128() as f64;
-        let format_price = utils::format_units(U256::from((price * 1e18) as u128), decimal as i32)?;
-        println!("Formatted price in USDT: {}", format_price);
-        Ok(format_price)
-    }
-
-    async fn get_token_price_in_weth(&self, token_address: Address) -> Result<String> {
-        // Placeholder implementation
-        let factory_address = Address::from_str(UNISWAP_FACTORY_V2_ADDRESS)?;
-        let weth_address = Address::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")?;
-        let factory_contract = Contract::new(factory_address, FACTORY_V2_ABI.clone(), self.provider.clone());
-        let pair_address: Address = factory_contract
-            .method::<_, Address>("getPair", (token_address, weth_address))?
-            .call()
-            .await
-            .map_err(|e| TokenServiceError::ContractCallError(e.to_string()))?;
-        let pair_contract = Contract::new(pair_address, PAIR_V2_ABI.clone(), self.provider.clone());
-        let (reserve0, reserve1, _): (U256, U256, u32) = pair_contract
-            .method::<_, (U256, U256, u32)>("getReserves", ())?
-            .call()
-            .await
-            .map_err(|e| TokenServiceError::ContractCallError(e.to_string()))?;
-        println!("Reserves: reserve0 = {}, reserve1 = {}", reserve0, reserve1);
-        let decimal = pair_contract
-            .method::<_, u8>("decimals", ())?
-            .call()
-            .await
-            .map_err(|e| TokenServiceError::ContractCallError(e.to_string()))?;
-        let price = reserve1.as_u128() as f64 / reserve0.as_u128() as f64;
-        let format_price = utils::format_units(U256::from((price * 1e18) as u128), decimal as i32)?;
-        println!("Formatted price in WETH: {}", format_price);
-        Ok(format_price)
-    }
-
-    async fn swap_tokens(&self, from_token: Address, to_token: Address, amount: f64, slippage: f64) -> Result<SwapSimulationInfo> {
-        // Placeholder implementation
-        Ok(SwapSimulationInfo {
-            input_amount: amount.to_string(),
-            output_amount: (amount * (1.0 - slippage)).to_string(),
-            gas_estimate: 21000,
-            gas_cost_eth: "0.01".into(),
-            gas_cost_usd: Some("20.0".into()),
-            price_impact: 0.5,
-            success: true,
-        })
-    }
-
+#[tool_handler]
+impl ServerHandler for ETHTradingMCP {
 }
